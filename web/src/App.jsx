@@ -5,6 +5,7 @@ import LoginPage from './pages/Login.jsx';
 import DashboardPage from './pages/Dashboard.jsx';
 import InventoryPage from './pages/Inventory.jsx';
 import POSPage from './pages/POS.jsx';
+import TradeInsPage from './pages/TradeIns.jsx';
 import CustomersPage from './pages/Customers.jsx';
 import CustomerDetailPage from './pages/CustomerDetail.jsx';
 import ReportsPage from './pages/Reports.jsx';
@@ -32,6 +33,7 @@ export default function App() {
                   <Route path="/" element={<DashboardPage />} />
                   <Route path="/inventory" element={<InventoryPage />} />
                   <Route path="/pos" element={<POSPage />} />
+                  <Route path="/trade-ins" element={<TradeInsPage />} />
                   <Route path="/customers" element={<CustomersPage />} />
                   <Route path="/customers/:id" element={<CustomerDetailPage />} />
                   <Route path="/reports" element={<ReportsPage />} />
