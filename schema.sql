@@ -153,6 +153,8 @@ create table if not exists public.transactions (
 
   loyalty_points_earned integer not null default 0,
   loyalty_points_redeemed integer not null default 0,
+  store_credit_redeemed   numeric(12, 2) not null default 0
+    check (store_credit_redeemed >= 0),
 
   notes           text,
   voided          boolean not null default false,
@@ -161,6 +163,11 @@ create table if not exists public.transactions (
 
   created_at      timestamptz not null default now()
 );
+
+-- Idempotent column add for shops that already ran an earlier version of this
+-- schema before Phase 1 added explicit store-credit tracking on each sale.
+alter table public.transactions
+  add column if not exists store_credit_redeemed numeric(12, 2) not null default 0;
 
 create index if not exists transactions_customer_idx     on public.transactions (customer_id);
 create index if not exists transactions_user_idx         on public.transactions (user_id);

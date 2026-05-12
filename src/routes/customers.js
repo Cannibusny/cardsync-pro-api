@@ -35,8 +35,14 @@ router.get('/', async (req, res, next) => {
     const supabase = getSupabase();
     let query = supabase.from('customers').select('*', { count: 'exact' });
     if (req.query.q) {
-      const q = req.query.q.toLowerCase();
-      query = query.or(`name.ilike.%${q}%,email.ilike.%${q}%,phone.ilike.%${q}%`);
+      // Strip PostgREST filter-syntax chars (commas, parens, dots) AND LIKE wildcards.
+      // `.or()` passes the raw string to PostgREST's parser, so unsanitized input
+      // could inject additional filter clauses. Strip aggressively — operators only
+      // need to type the customer's name/email/phone.
+      const safe = String(req.query.q).toLowerCase().replace(/[%_,.()]/g, '');
+      if (safe.length > 0) {
+        query = query.or(`name.ilike.%${safe}%,email.ilike.%${safe}%,phone.ilike.%${safe}%`);
+      }
     }
     if (req.query.has_credit === 'true') query = query.gt('store_credit', 0);
     if (req.query.tier === 'vip') query = query.gte('total_spent', 1000);
@@ -81,7 +87,6 @@ router.post('/', requireMinRole('employee'), async (req, res, next) => {
 router.patch('/:id', requireMinRole('employee'), async (req, res, next) => {
   try {
     const payload = validate(req.body, UPDATE_SPEC);
-    if (Object.keys(payload).length === 0) throw badRequest('No fields to update');
 
     // Employees cannot directly adjust store_credit (it would defeat audit trails);
     // they must use POS or buylist flows. Managers and above may override.
@@ -89,6 +94,10 @@ router.patch('/:id', requireMinRole('employee'), async (req, res, next) => {
       delete payload.store_credit;
       delete payload.loyalty_points;
     }
+
+    // Empty-payload check runs AFTER stripping so employees who try to update only
+    // restricted fields get a clean 400 instead of an empty SQL UPDATE.
+    if (Object.keys(payload).length === 0) throw badRequest('No fields to update');
 
     const supabase = getSupabase();
     const { data, error } = await supabase

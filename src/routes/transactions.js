@@ -85,16 +85,18 @@ router.post('/', requireMinRole('employee'), async (req, res, next) => {
     const lineItems = [];
     let subtotal = 0;
 
+    // Aggregate requested quantities per card_id so cumulative demand (when the
+    // same card appears on multiple line items) is checked against stock once,
+    // not per line. Same map drives the post-sale inventory decrement so we do
+    // a single update per card and avoid lost-update races.
+    const qtyByCard = new Map();
+
     for (const raw of body.items) {
       if (!raw || !raw.card_id || !raw.qty || raw.qty < 1) {
         throw badRequest('Each item must include card_id and qty (>=1)');
       }
       const card = byId.get(raw.card_id);
       if (!card) throw badRequest(`Unknown card_id ${raw.card_id}`);
-      const available = (card.quantity || 0) - (card.quantity_reserved || 0);
-      if (raw.qty > available) {
-        throw conflict(`"${card.name}" only has ${available} in stock (requested ${raw.qty})`);
-      }
 
       let unitPrice = Number(card.sell_price || 0);
       if (raw.unit_price !== undefined && raw.unit_price !== null) {
@@ -118,6 +120,17 @@ router.post('/', requireMinRole('employee'), async (req, res, next) => {
         subtotal:   lineTotal,
       });
       subtotal += lineTotal;
+      qtyByCard.set(card.id, (qtyByCard.get(card.id) || 0) + Number(raw.qty));
+    }
+
+    // Cumulative stock check (after aggregation — so duplicate card_ids can't
+    // each pass the per-line check independently).
+    for (const [card_id, totalQty] of qtyByCard) {
+      const card = byId.get(card_id);
+      const available = (card.quantity || 0) - (card.quantity_reserved || 0);
+      if (totalQty > available) {
+        throw conflict(`"${card.name}" only has ${available} in stock (requested ${totalQty})`);
+      }
     }
 
     subtotal = round2(subtotal);
@@ -181,6 +194,9 @@ router.post('/', requireMinRole('employee'), async (req, res, next) => {
       stripe_payment_intent: body.stripe_payment_intent || null,
       loyalty_points_earned:   earnedPoints,
       loyalty_points_redeemed: redeemedLoyaltyPoints,
+      // Persisted so a later void can credit back the right amount regardless of
+      // payment_method (store credit can be redeemed on top of any payment method).
+      store_credit_redeemed:   redeemedCredit,
       notes:                 body.notes || null,
     };
 
@@ -193,11 +209,13 @@ router.post('/', requireMinRole('employee'), async (req, res, next) => {
       .from('transactions').insert(txnRow).select().single();
     if (insErr) throw insErr;
 
-    // Decrement card quantities — best-effort sequential updates.
-    await Promise.all(lineItems.map(async (li) => {
-      const card = byId.get(li.card_id);
-      const newQty = Math.max(0, (card.quantity || 0) - li.qty);
-      await supabase.from('cards').update({ quantity: newQty }).eq('id', li.card_id);
+    // Decrement card quantities — one update per *card*, not per line item, so
+    // the same card appearing across multiple line items gets a single combined
+    // decrement and there's no last-write-wins race.
+    await Promise.all([...qtyByCard.entries()].map(async ([card_id, totalQty]) => {
+      const card = byId.get(card_id);
+      const newQty = Math.max(0, (card.quantity || 0) - totalQty);
+      await supabase.from('cards').update({ quantity: newQty }).eq('id', card_id);
     }));
 
     // Update customer aggregates.
@@ -237,11 +255,16 @@ router.post('/:id/void', requireMinRole('manager'), async (req, res, next) => {
     if (!txn) throw notFound('Transaction not found');
     if (txn.voided) throw conflict('Transaction is already voided');
 
-    // Restore inventory.
-    await Promise.all((txn.items || []).map(async (li) => {
-      const { data: card } = await supabase.from('cards').select('quantity').eq('id', li.card_id).maybeSingle();
+    // Restore inventory — aggregate qty per card_id so duplicate line items only
+    // get one combined update.
+    const restoreByCard = new Map();
+    for (const li of (txn.items || [])) {
+      restoreByCard.set(li.card_id, (restoreByCard.get(li.card_id) || 0) + Number(li.qty));
+    }
+    await Promise.all([...restoreByCard.entries()].map(async ([card_id, qty]) => {
+      const { data: card } = await supabase.from('cards').select('quantity').eq('id', card_id).maybeSingle();
       if (!card) return;
-      await supabase.from('cards').update({ quantity: (card.quantity || 0) + Number(li.qty) }).eq('id', li.card_id);
+      await supabase.from('cards').update({ quantity: (card.quantity || 0) + qty }).eq('id', card_id);
     }));
 
     // Reverse customer credit/loyalty changes.
@@ -250,7 +273,11 @@ router.post('/:id/void', requireMinRole('manager'), async (req, res, next) => {
         .from('customers').select('store_credit, loyalty_points, total_spent')
         .eq('id', txn.customer_id).maybeSingle();
       if (cust) {
-        const newCredit  = round2((cust.store_credit || 0) + (txn.payment_method === 'store_credit' ? Number(txn.total) : 0));
+        // Restore exactly the store-credit dollars that the sale consumed,
+        // regardless of payment_method. This relies on store_credit_redeemed
+        // being persisted on the transaction row at sale time.
+        const creditToRestore = Number(txn.store_credit_redeemed || 0);
+        const newCredit  = round2((cust.store_credit || 0) + creditToRestore);
         const newPoints  = Math.max(0, (cust.loyalty_points || 0) + (txn.loyalty_points_redeemed || 0) - (txn.loyalty_points_earned || 0));
         const newSpent   = round2(Math.max(0, (cust.total_spent || 0) - Number(txn.total)));
         await supabase.from('customers').update({

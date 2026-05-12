@@ -117,13 +117,16 @@ router.post('/', requireMinRole('employee'), async (req, res, next) => {
 router.patch('/:id', requireMinRole('employee'), async (req, res, next) => {
   try {
     const payload = validate(req.body, UPDATE_SPEC);
-    if (Object.keys(payload).length === 0) throw badRequest('No fields to update');
 
     // Employees may not change cost_basis or sell_price (spec: "cannot change prices").
     if (req.user.role === 'employee') {
       delete payload.cost_basis;
       delete payload.sell_price;
     }
+
+    // Empty-payload check runs AFTER stripping so employees who only send restricted
+    // fields receive a clean 400 instead of an empty SQL UPDATE.
+    if (Object.keys(payload).length === 0) throw badRequest('No fields to update');
 
     const supabase = getSupabase();
     const { data, error } = await supabase
