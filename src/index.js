@@ -23,6 +23,7 @@ const uploadRouter       = require('./routes/upload');
 const tradeInsRouter     = require('./routes/trade-ins');
 const settingsRouter     = require('./routes/settings');
 const gradingRouter      = require('./routes/grading');
+const eventsRouter       = require('./routes/events');
 
 const app = express();
 
@@ -58,6 +59,7 @@ app.use('/api/upload',       uploadRouter);
 app.use('/api/trade-ins',    tradeInsRouter);
 app.use('/api/settings',     settingsRouter);
 app.use('/api/grading',      gradingRouter);
+app.use('/api/events',       eventsRouter);
 
 // ----- Static frontend (when web/ has been built) -----
 const webDist = path.join(__dirname, '..', 'web', 'dist');
