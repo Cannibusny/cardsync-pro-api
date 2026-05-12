@@ -22,6 +22,7 @@ const reportsRouter      = require('./routes/reports');
 const uploadRouter       = require('./routes/upload');
 const tradeInsRouter     = require('./routes/trade-ins');
 const settingsRouter     = require('./routes/settings');
+const gradingRouter      = require('./routes/grading');
 
 const app = express();
 
@@ -56,6 +57,7 @@ app.use('/api/reports',      reportsRouter);
 app.use('/api/upload',       uploadRouter);
 app.use('/api/trade-ins',    tradeInsRouter);
 app.use('/api/settings',     settingsRouter);
+app.use('/api/grading',      gradingRouter);
 
 // ----- Static frontend (when web/ has been built) -----
 const webDist = path.join(__dirname, '..', 'web', 'dist');

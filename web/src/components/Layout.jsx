@@ -7,6 +7,7 @@ const NAV = [
   { to: '/pos',       label: 'POS',        icon: '💰', min: 'employee'  },
   { to: '/trade-ins', label: 'Trade-ins',  icon: '🔁', min: 'employee'  },
   { to: '/customers', label: 'Customers',  icon: '👥', min: 'view_only' },
+  { to: '/grading',   label: 'Grading',    icon: '🏅', min: 'employee'  },
   { to: '/reports',   label: 'Reports',    icon: '📊', min: 'employee'  },
   { to: '/users',     label: 'Staff',      icon: '🛡️', min: 'manager'   },
   { to: '/settings',  label: 'Settings',   icon: '⚙️', min: 'manager'   },
