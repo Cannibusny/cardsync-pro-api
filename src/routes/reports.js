@@ -203,4 +203,304 @@ router.get('/customers/top', requireMinRole('manager'), async (req, res, next) =
   } catch (err) { next(err); }
 });
 
+// --- Phase 2E — Advanced analytics ----------------------------------------
+
+// GET /api/reports/profit/by-game?days=30
+// Per-game revenue, cost, profit, margin, units for the window. Pulls
+// transactions in window, batches a single cards lookup for cost_basis +
+// game/product_type metadata, then aggregates.
+router.get('/profit/by-game', requireMinRole('manager'), async (req, res, next) => {
+  try {
+    const days = Math.min(Number(req.query.days) || 30, 365);
+    const since = daysAgo(days).toISOString();
+    const supabase = getSupabase();
+
+    const { data: txns, error } = await supabase
+      .from('transactions').select('items').eq('voided', false).gte('created_at', since);
+    if (error) throw error;
+
+    const allCardIds = new Set();
+    for (const t of txns || []) for (const it of (t.items || [])) if (it.card_id) allCardIds.add(it.card_id);
+
+    let cardMeta = new Map();
+    if (allCardIds.size) {
+      const { data: cards } = await supabase
+        .from('cards').select('id, cost_basis, game, product_type').in('id', Array.from(allCardIds));
+      cardMeta = new Map((cards || []).map((c) => [c.id, c]));
+    }
+
+    const buckets = new Map();
+    const ensure = (game) => {
+      const key = game || 'unknown';
+      if (!buckets.has(key)) buckets.set(key, { game: key, revenue: 0, cost: 0, units: 0, lines: 0 });
+      return buckets.get(key);
+    };
+
+    for (const t of txns || []) {
+      for (const it of (t.items || [])) {
+        const meta = it.card_id ? cardMeta.get(it.card_id) : null;
+        const b = ensure(meta?.game || 'unknown');
+        const subtotal = Number(it.subtotal);
+        const lineRevenue = Number.isFinite(subtotal)
+          ? subtotal
+          : (Number(it.unit_price) * Number(it.qty));
+        const lineCost = (Number(meta?.cost_basis) || 0) * (Number(it.qty) || 0);
+        b.revenue += lineRevenue;
+        b.cost    += lineCost;
+        b.units   += Number(it.qty) || 0;
+        b.lines   += 1;
+      }
+    }
+
+    const series = Array.from(buckets.values())
+      .map((b) => ({
+        game:    b.game,
+        revenue: Math.round(b.revenue * 100) / 100,
+        cost:    Math.round(b.cost    * 100) / 100,
+        profit:  Math.round((b.revenue - b.cost) * 100) / 100,
+        margin:  b.revenue ? Math.round(((b.revenue - b.cost) / b.revenue) * 1000) / 10 : 0,
+        units:   b.units,
+        lines:   b.lines,
+      }))
+      .sort((a, b) => b.profit - a.profit);
+
+    res.json({ days, series });
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/sales/top-movers?days=30&limit=10
+router.get('/sales/top-movers', requireMinRole('manager'), async (req, res, next) => {
+  try {
+    const days  = Math.min(Number(req.query.days)  || 30, 365);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 10, 1), 100);
+    const since = daysAgo(days).toISOString();
+    const supabase = getSupabase();
+
+    const { data: txns, error } = await supabase
+      .from('transactions').select('items').eq('voided', false).gte('created_at', since);
+    if (error) throw error;
+
+    const tally = new Map();
+    for (const t of txns || []) {
+      for (const it of (t.items || [])) {
+        if (!it.card_id) continue;
+        const cur = tally.get(it.card_id) || { card_id: it.card_id, name: it.name || '', units: 0, revenue: 0 };
+        const subtotal = Number(it.subtotal);
+        const lineRevenue = Number.isFinite(subtotal)
+          ? subtotal
+          : (Number(it.unit_price) * Number(it.qty));
+        cur.units += Number(it.qty) || 0;
+        cur.revenue += lineRevenue;
+        if (!cur.name && it.name) cur.name = it.name;
+        tally.set(it.card_id, cur);
+      }
+    }
+
+    const top = Array.from(tally.values())
+      .sort((a, b) => b.units - a.units || b.revenue - a.revenue)
+      .slice(0, limit);
+
+    // Enrich with current inventory data for context.
+    if (top.length) {
+      const { data: cards } = await supabase
+        .from('cards').select('id, name, game, quantity, sell_price, card_set, number')
+        .in('id', top.map((t) => t.card_id));
+      const byId = new Map((cards || []).map((c) => [c.id, c]));
+      for (const r of top) {
+        const c = byId.get(r.card_id);
+        if (c) {
+          r.name        = c.name || r.name;
+          r.game        = c.game || null;
+          r.card_set    = c.card_set || null;
+          r.number      = c.number || null;
+          r.in_stock    = c.quantity;
+          r.sell_price  = c.sell_price;
+        }
+        r.revenue = Math.round(r.revenue * 100) / 100;
+      }
+    }
+
+    res.json({ days, limit, data: top });
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/sales/slow-movers?days=60&limit=20
+// Cards with quantity > 0 and ZERO unit sales in the window.
+router.get('/sales/slow-movers', requireMinRole('manager'), async (req, res, next) => {
+  try {
+    const days  = Math.min(Number(req.query.days)  || 60, 365);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 200);
+    const since = daysAgo(days).toISOString();
+    const supabase = getSupabase();
+
+    const [{ data: cards, error: cErr }, { data: txns, error: tErr }] = await Promise.all([
+      supabase.from('cards')
+        .select('id, name, game, card_set, number, quantity, sell_price, cost_basis, created_at')
+        .gt('quantity', 0),
+      supabase.from('transactions').select('items').eq('voided', false).gte('created_at', since),
+    ]);
+    if (cErr) throw cErr;
+    if (tErr) throw tErr;
+
+    const recentlySold = new Set();
+    for (const t of txns || []) {
+      for (const it of (t.items || [])) {
+        if (it.card_id) recentlySold.add(it.card_id);
+      }
+    }
+
+    const slow = (cards || [])
+      .filter((c) => !recentlySold.has(c.id))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        game: c.game,
+        card_set: c.card_set,
+        number: c.number,
+        quantity: c.quantity,
+        sell_price: c.sell_price,
+        cost_basis: c.cost_basis,
+        capital_locked: Math.round((Number(c.cost_basis) || 0) * (Number(c.quantity) || 0) * 100) / 100,
+        added_at: c.created_at,
+      }))
+      .sort((a, b) => (b.capital_locked || 0) - (a.capital_locked || 0))
+      .slice(0, limit);
+
+    res.json({ days, limit, data: slow });
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/trade-ins/summary?days=30
+router.get('/trade-ins/summary', requireMinRole('manager'), async (req, res, next) => {
+  try {
+    const days = Math.min(Number(req.query.days) || 30, 365);
+    const since = daysAgo(days).toISOString();
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('trade_ins').select('total_offer, payment_method, store_credit_bonus, cards, created_at')
+      .gte('created_at', since);
+    if (error) throw error;
+
+    const summary = {
+      count: 0,
+      total_offered: 0,
+      total_bonus: 0,
+      by_method: { cash: { count: 0, total: 0 }, store_credit: { count: 0, total: 0 } },
+      total_cards: 0,
+    };
+
+    for (const t of data || []) {
+      summary.count += 1;
+      summary.total_offered += Number(t.total_offer) || 0;
+      summary.total_bonus   += Number(t.store_credit_bonus) || 0;
+      const m = t.payment_method;
+      if (!summary.by_method[m]) summary.by_method[m] = { count: 0, total: 0 };
+      summary.by_method[m].count += 1;
+      summary.by_method[m].total += Number(t.total_offer) || 0;
+      if (Array.isArray(t.cards)) {
+        for (const c of t.cards) summary.total_cards += Number(c.qty) || 0;
+      }
+    }
+
+    summary.total_offered = Math.round(summary.total_offered * 100) / 100;
+    summary.total_bonus   = Math.round(summary.total_bonus   * 100) / 100;
+    for (const k of Object.keys(summary.by_method)) {
+      summary.by_method[k].total = Math.round(summary.by_method[k].total * 100) / 100;
+    }
+    res.json({ days, ...summary });
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/grading/summary?days=30
+router.get('/grading/summary', requireMinRole('manager'), async (req, res, next) => {
+  try {
+    const days = Math.min(Number(req.query.days) || 30, 365);
+    const since = daysAgo(days).toISOString();
+    const supabase = getSupabase();
+
+    const { data, error } = await supabase
+      .from('grading_submissions').select('status, service, service_fee, concierge_fee, cards, created_at')
+      .gte('created_at', since);
+    if (error) throw error;
+
+    const summary = {
+      count: 0,
+      total_revenue: 0,
+      by_status: {},
+      by_service: {},
+      total_cards: 0,
+    };
+
+    for (const s of data || []) {
+      summary.count += 1;
+      const fee = (Number(s.service_fee) || 0) + (Number(s.concierge_fee) || 0);
+      summary.total_revenue += fee;
+      summary.by_status[s.status] = (summary.by_status[s.status] || 0) + 1;
+      const sv = summary.by_service[s.service] || { count: 0, revenue: 0 };
+      sv.count += 1;
+      sv.revenue += fee;
+      summary.by_service[s.service] = sv;
+      if (Array.isArray(s.cards)) {
+        for (const c of s.cards) summary.total_cards += Number(c.qty) || 0;
+      }
+    }
+
+    summary.total_revenue = Math.round(summary.total_revenue * 100) / 100;
+    for (const k of Object.keys(summary.by_service)) {
+      summary.by_service[k].revenue = Math.round(summary.by_service[k].revenue * 100) / 100;
+    }
+    res.json({ days, ...summary });
+  } catch (err) { next(err); }
+});
+
+// GET /api/reports/employees/performance?days=30
+// Per-operator: transactions count, revenue, items sold.
+router.get('/employees/performance', requireMinRole('manager'), async (req, res, next) => {
+  try {
+    const days = Math.min(Number(req.query.days) || 30, 365);
+    const since = daysAgo(days).toISOString();
+    const supabase = getSupabase();
+
+    const [{ data: txns, error: tErr }, { data: users, error: uErr }] = await Promise.all([
+      supabase.from('transactions').select('user_id, total, items').eq('voided', false).gte('created_at', since),
+      supabase.from('users').select('id, name, email, role'),
+    ]);
+    if (tErr) throw tErr;
+    if (uErr) throw uErr;
+
+    const userMap = new Map((users || []).map((u) => [u.id, u]));
+    const tally = new Map();
+    const ensure = (uid) => {
+      const key = uid || 'unattributed';
+      if (!tally.has(key)) {
+        const u = uid ? userMap.get(uid) : null;
+        tally.set(key, {
+          user_id: uid || null,
+          name: u?.name || (uid ? '(deleted user)' : '(unattributed)'),
+          email: u?.email || null,
+          role: u?.role || null,
+          transactions: 0,
+          revenue: 0,
+          items: 0,
+        });
+      }
+      return tally.get(key);
+    };
+
+    for (const t of txns || []) {
+      const b = ensure(t.user_id);
+      b.transactions += 1;
+      b.revenue += Number(t.total) || 0;
+      if (Array.isArray(t.items)) for (const it of t.items) b.items += Number(it.qty) || 0;
+    }
+
+    const data = Array.from(tally.values())
+      .map((r) => ({ ...r, revenue: Math.round(r.revenue * 100) / 100 }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    res.json({ days, data });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
