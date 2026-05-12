@@ -22,6 +22,7 @@ export const apiGet  = (p)        => api(p);
 export const apiPost = (p, body)  => api(p, { method: 'POST',  body });
 export const apiPatch = (p, body) => api(p, { method: 'PATCH', body });
 export const apiDel  = (p)        => api(p, { method: 'DELETE' });
+export const apiDelete = apiDel;
 
 export function fmtMoney(n) {
   const x = Number(n) || 0;
