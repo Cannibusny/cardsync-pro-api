@@ -43,16 +43,6 @@ app.get('/health', (_req, res) => {
   });
 });
 
-app.get('/', (_req, res) => {
-  // When the web bundle is present we serve it on `/`; this fallback only
-  // runs in API-only mode.
-  res.json({
-    name: 'CardSync Pro API',
-    status: 'ok',
-    docs: 'See README.md',
-  });
-});
-
 // ----- API routes -----
 app.use('/api/auth',         authRouter);
 app.use('/api/cards',        cardsRouter);
@@ -67,8 +57,17 @@ app.use('/api/upload',       uploadRouter);
 const webDist = path.join(__dirname, '..', 'web', 'dist');
 if (fs.existsSync(webDist)) {
   app.use(express.static(webDist));
-  app.get(/^(?!\/api).*/, (_req, res) => {
+  // SPA fallback: any non-/api path returns index.html so client-side routing works.
+  app.get(/^(?!\/api|\/health).*/, (_req, res) => {
     res.sendFile(path.join(webDist, 'index.html'));
+  });
+} else {
+  app.get('/', (_req, res) => {
+    res.json({
+      name: 'CardSync Pro API',
+      status: 'ok',
+      docs: 'See README.md',
+    });
   });
 }
 
