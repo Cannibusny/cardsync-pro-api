@@ -222,7 +222,11 @@ router.post('/', requireMinRole('employee'), async (req, res, next) => {
         .eq('game', line.game)
         .eq('condition', line.condition)
         .limit(1);
+      // Match on null card_set explicitly when the line didn't specify one,
+      // otherwise the lookup would match any card_set and pick an arbitrary
+      // row to merge into (potentially from a totally different set).
       if (line.card_set) lookup = lookup.eq('card_set', line.card_set);
+      else               lookup = lookup.is('card_set', null);
       const { data: existing } = await lookup;
 
       if (existing && existing.length > 0) {
