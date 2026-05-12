@@ -5,8 +5,10 @@ import LoginPage from './pages/Login.jsx';
 import DashboardPage from './pages/Dashboard.jsx';
 import InventoryPage from './pages/Inventory.jsx';
 import POSPage from './pages/POS.jsx';
+import TradeInsPage from './pages/TradeIns.jsx';
 import CustomersPage from './pages/Customers.jsx';
 import CustomerDetailPage from './pages/CustomerDetail.jsx';
+import GradingPage from './pages/Grading.jsx';
 import ReportsPage from './pages/Reports.jsx';
 import UsersPage from './pages/Users.jsx';
 import SettingsPage from './pages/Settings.jsx';
@@ -32,8 +34,10 @@ export default function App() {
                   <Route path="/" element={<DashboardPage />} />
                   <Route path="/inventory" element={<InventoryPage />} />
                   <Route path="/pos" element={<POSPage />} />
+                  <Route path="/trade-ins" element={<TradeInsPage />} />
                   <Route path="/customers" element={<CustomersPage />} />
                   <Route path="/customers/:id" element={<CustomerDetailPage />} />
+                  <Route path="/grading" element={<GradingPage />} />
                   <Route path="/reports" element={<ReportsPage />} />
                   <Route path="/users" element={<UsersPage />} />
                   <Route path="/settings" element={<SettingsPage />} />
