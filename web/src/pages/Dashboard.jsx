@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 import { apiGet, fmtMoney } from '../api';
 import { useAuth, hasRole } from '../auth.jsx';
+import JsonLd from '../components/JsonLd.jsx';
+import { buildStoreSchema } from '../utils/schemaMarkup.js';
 
 export default function DashboardPage() {
   const { user } = useAuth();
@@ -11,8 +13,11 @@ export default function DashboardPage() {
   const inv = useQuery({ queryKey: ['inv-summary'], queryFn: () => apiGet('/api/reports/inventory/summary') });
   const lowStock = useQuery({ queryKey: ['low-stock'], queryFn: () => apiGet('/api/reports/inventory/low-stock?threshold=2') });
 
+  const storeSchema = buildStoreSchema();
+
   return (
     <div className="space-y-6">
+      <JsonLd schema={storeSchema} />
       <div>
         <h1 className="text-2xl font-bold text-slate-800">Hi {user?.name?.split(' ')[0] || 'there'} 👋</h1>
         <p className="text-sm text-slate-500">Here's how Electronic Valet is doing today.</p>
