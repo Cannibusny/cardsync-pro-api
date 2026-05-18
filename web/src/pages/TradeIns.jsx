@@ -2,6 +2,8 @@ import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiGet, apiPost, fmtMoney, fmtDate } from '../api';
 import { useAuth, hasRole } from '../auth.jsx';
+import JsonLd from '../components/JsonLd.jsx';
+import { buildStoreSchema, buildOfferSchema } from '../utils/schemaMarkup.js';
 
 const GAMES = ['pokemon', 'magic', 'yugioh', 'onepiece', 'other'];
 const CONDITIONS = ['NM', 'LP', 'MP', 'HP', 'DMG', 'SEALED'];
@@ -122,8 +124,14 @@ export default function TradeInsPage() {
     }
   };
 
+  const storeSchema = buildStoreSchema();
+  const offerSchemas = lines
+    .filter((l) => l.name && l.buy_price)
+    .map((l) => buildOfferSchema(l, l.buy_price));
+
   return (
     <div className="space-y-4">
+      <JsonLd schema={[storeSchema, ...offerSchemas]} />
       <div>
         <h1 className="text-2xl font-bold">Trade-ins & Buylist</h1>
         <p className="text-sm text-slate-500">

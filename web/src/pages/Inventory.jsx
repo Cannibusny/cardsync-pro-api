@@ -3,6 +3,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { apiGet, apiPost, apiPatch, apiDel, fmtMoney } from '../api';
 import { useAuth, hasRole } from '../auth.jsx';
+import JsonLd from '../components/JsonLd.jsx';
+import { buildStoreSchema, buildProductListSchemas } from '../utils/schemaMarkup.js';
 
 const GAMES = ['pokemon','magic','yugioh','onepiece','other'];
 const CONDITIONS = ['NM','LP','MP','HP','DMG','SEALED'];
@@ -32,8 +34,12 @@ export default function InventoryPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['cards'] }),
   });
 
+  const storeSchema = buildStoreSchema();
+  const productSchemas = cards.data?.data ? buildProductListSchemas(cards.data.data) : [];
+
   return (
     <div className="space-y-4">
+      <JsonLd schema={[storeSchema, ...productSchemas]} />
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold">Inventory</h1>
