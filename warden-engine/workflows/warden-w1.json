@@ -1,0 +1,587 @@
+{
+  "id": "eFBjTec7ykmZazk4",
+  "name": "WARDEN-W1: Intake & Gate",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "warden/intake",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-w1-webhook",
+      "name": "Webhook Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "warden-intake-id",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6e39Yasa0S0l78YJ",
+          "name": "Warden Intake Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// WARDEN-W1 Node 2: PII Scrub + HMAC Hash + Duplicate Check + Supabase Insert\nconst crypto = require('crypto');\nconst body = $input.first().json.body || $input.first().json;\n\n// Validate required fields\nif (!body.requesting_agent || !body.target_service || !body.payload_data) {\n  return [{ json: { error_response: true, status_code: 400,\n    response_body: { error: 'Missing required fields' } } }];\n}\n\n// Step 2a: PII strip\nconst piiPattern = /phone|email|ssn|dob|address|name|first|last/i;\nconst sanitized_payload = {};\nfor (const [key, value] of Object.entries(body.payload_data)) {\n  if (!piiPattern.test(key)) { sanitized_payload[key] = value; }\n}\n\n// Step 2b: HMAC-SHA256\nconst hmacSecret = $env.WARDEN_HMAC_SECRET;\nconst security_hash = crypto\n  .createHmac('sha256', hmacSecret)\n  .update(JSON.stringify(sanitized_payload))\n  .digest('hex');\n\n// Step 2c: Duplicate check against Supabase\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\nconst dupCheck = await fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?security_hash=eq.${security_hash}&status=neq.FAILED&select=id`,\n  { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }\n);\nconst dupRows = await dupCheck.json();\nif (dupRows && dupRows.length > 0) {\n  return [{ json: { error_response: true, status_code: 409,\n    response_body: { error: 'Duplicate request', existing_id: dupRows[0].id } } }];\n}\n\n// Step 2d: Supabase insert\nconst insertRes = await fetch(`${supabaseUrl}/rest/v1/warden_transactions`, {\n  method: 'POST',\n  headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`,\n    'Content-Type': 'application/json', 'Prefer': 'return=representation' },\n  body: JSON.stringify({\n    requesting_agent: body.requesting_agent, target_service: body.target_service,\n    payload_data: sanitized_payload, status: 'PENDING', security_hash: security_hash })\n});\nconst insertData = await insertRes.json();\nif (!insertRes.ok) {\n  return [{ json: { error_response: true, status_code: 500,\n    response_body: { error: 'Database insert failed', detail: JSON.stringify(insertData) } } }];\n}\nconst row = Array.isArray(insertData) ? insertData[0] : insertData;\nreturn [{ json: { transaction_id: row.id, requesting_agent: body.requesting_agent,\n  target_service: body.target_service, sanitized_payload: sanitized_payload,\n  security_hash: security_hash, created_at: row.created_at, error_response: false } }];\n"
+      },
+      "id": "node-w1-code",
+      "name": "Security PII Scrub HMAC Insert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": ""
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.error_response }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-w1-if",
+      "name": "Check Error",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response_body) }}",
+        "options": {
+          "responseCode": "={{ $json.status_code }}"
+        }
+      },
+      "id": "node-w1-respond-error",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'PENDING', transaction_id: $json.transaction_id, message: 'Request received and queued for approval' }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-w1-respond-ok",
+      "name": "Respond PENDING",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ text: '[SYSTEM] You are a security risk analyst. Summarize the following API request payload in plain English in under 30 words. Focus entirely on operational impact and risk \u2014 what will physically happen if this executes. Do not repeat field names. Do not expose any token, key, or secret string. Output only the summary sentence.\\n\\n[PAYLOAD]\\nService: ' + $json.target_service + '\\nAgent: ' + $json.requesting_agent + '\\nData: ' + JSON.stringify($json.sanitized_payload) }] }], generationConfig: { temperature: 0, maxOutputTokens: 60 } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "node-w1-gemini",
+      "name": "Gemini Risk Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract risk summary from Gemini response, with fallback\nconst geminiResponse = $input.first().json;\nconst prevData = $('Respond PENDING').first().json;\n\nlet risk_summary = 'Unable to generate summary \u2014 review payload manually before approving.';\ntry {\n  if (geminiResponse.candidates && geminiResponse.candidates[0]) {\n    risk_summary = geminiResponse.candidates[0].content.parts[0].text.trim();\n  }\n} catch (e) {}\n\nreturn [{ json: { ...prevData, risk_summary } }];\n"
+      },
+      "id": "node-w1-extract",
+      "name": "Extract Risk Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Approval Email placeholder - logs instead of sending\n// In production, this will be a Gmail/SMTP node\nconst data = $input.first().json;\nconsole.log('[WARDEN] Would send approval email to:', $env.WARDEN_ADMIN_EMAIL);\nconsole.log('[WARDEN] Subject: [WARDEN] Action Required:', data.target_service, '\u2014', data.requesting_agent);\nreturn [{ json: data }];\n"
+      },
+      "id": "node-w1-email",
+      "name": "Approval Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {
+          "webhookSuffix": "=/warden/resume/{{ $json.transaction_id }}",
+          "timeout": "72",
+          "timeoutUnit": "hours"
+        }
+      },
+      "id": "node-w1-wait",
+      "name": "Wait for Resolution",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        100
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Intake": {
+      "main": [
+        [
+          {
+            "node": "Security PII Scrub HMAC Insert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security PII Scrub HMAC Insert": {
+      "main": [
+        [
+          {
+            "node": "Check Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Error": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond PENDING",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond PENDING": {
+      "main": [
+        [
+          {
+            "node": "Gemini Risk Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Risk Summary": {
+      "main": [
+        [
+          {
+            "node": "Extract Risk Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Risk Summary": {
+      "main": [
+        [
+          {
+            "node": "Approval Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Email": {
+      "main": [
+        [
+          {
+            "node": "Wait for Resolution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "activeVersionId": "12b4afe4-af36-4173-8970-710efabe9803",
+  "versionCounter": 24,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-05-31T17:05:45.052Z",
+      "createdAt": "2026-05-31T17:05:45.052Z",
+      "role": "workflow:owner",
+      "workflowId": "eFBjTec7ykmZazk4",
+      "projectId": "ArJYkH1wPqBHHSeU",
+      "project": {
+        "updatedAt": "2026-05-31T17:05:36.111Z",
+        "createdAt": "2026-05-31T17:05:05.597Z",
+        "id": "ArJYkH1wPqBHHSeU",
+        "name": "Warden Admin <admin@warden.local>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "cf05353b-f938-497c-aa05-9425603ac089"
+      }
+    }
+  ],
+  "tags": [],
+  "parentFolder": null,
+  "activeVersion": {
+    "updatedAt": "2026-05-31T17:17:19.552Z",
+    "createdAt": "2026-05-31T17:17:19.552Z",
+    "versionId": "12b4afe4-af36-4173-8970-710efabe9803",
+    "workflowId": "eFBjTec7ykmZazk4",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "warden/intake",
+          "authentication": "headerAuth",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "node-w1-webhook",
+        "name": "Webhook Intake",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          0,
+          0
+        ],
+        "webhookId": "warden-intake-id",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "6e39Yasa0S0l78YJ",
+            "name": "Warden Intake Auth"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "// WARDEN-W1 Node 2: PII Scrub + HMAC Hash + Duplicate Check + Supabase Insert\nconst crypto = require('crypto');\nconst body = $input.first().json.body || $input.first().json;\n\n// Validate required fields\nif (!body.requesting_agent || !body.target_service || !body.payload_data) {\n  return [{ json: { error_response: true, status_code: 400,\n    response_body: { error: 'Missing required fields' } } }];\n}\n\n// Step 2a: PII strip\nconst piiPattern = /phone|email|ssn|dob|address|name|first|last/i;\nconst sanitized_payload = {};\nfor (const [key, value] of Object.entries(body.payload_data)) {\n  if (!piiPattern.test(key)) { sanitized_payload[key] = value; }\n}\n\n// Step 2b: HMAC-SHA256\nconst hmacSecret = $env.WARDEN_HMAC_SECRET;\nconst security_hash = crypto\n  .createHmac('sha256', hmacSecret)\n  .update(JSON.stringify(sanitized_payload))\n  .digest('hex');\n\n// Step 2c: Duplicate check against Supabase\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\nconst dupCheck = await fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?security_hash=eq.${security_hash}&status=neq.FAILED&select=id`,\n  { headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}` } }\n);\nconst dupRows = await dupCheck.json();\nif (dupRows && dupRows.length > 0) {\n  return [{ json: { error_response: true, status_code: 409,\n    response_body: { error: 'Duplicate request', existing_id: dupRows[0].id } } }];\n}\n\n// Step 2d: Supabase insert\nconst insertRes = await fetch(`${supabaseUrl}/rest/v1/warden_transactions`, {\n  method: 'POST',\n  headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`,\n    'Content-Type': 'application/json', 'Prefer': 'return=representation' },\n  body: JSON.stringify({\n    requesting_agent: body.requesting_agent, target_service: body.target_service,\n    payload_data: sanitized_payload, status: 'PENDING', security_hash: security_hash })\n});\nconst insertData = await insertRes.json();\nif (!insertRes.ok) {\n  return [{ json: { error_response: true, status_code: 500,\n    response_body: { error: 'Database insert failed', detail: JSON.stringify(insertData) } } }];\n}\nconst row = Array.isArray(insertData) ? insertData[0] : insertData;\nreturn [{ json: { transaction_id: row.id, requesting_agent: body.requesting_agent,\n  target_service: body.target_service, sanitized_payload: sanitized_payload,\n  security_hash: security_hash, created_at: row.created_at, error_response: false } }];\n"
+        },
+        "id": "node-w1-code",
+        "name": "Security PII Scrub HMAC Insert",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          220,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": ""
+            },
+            "conditions": [
+              {
+                "leftValue": "={{ $json.error_response }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          }
+        },
+        "id": "node-w1-if",
+        "name": "Check Error",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          440,
+          0
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify($json.response_body) }}",
+          "options": {
+            "responseCode": "={{ $json.status_code }}"
+          }
+        },
+        "id": "node-w1-respond-error",
+        "name": "Respond Error",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          660,
+          -100
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify({ status: 'PENDING', transaction_id: $json.transaction_id, message: 'Request received and queued for approval' }) }}",
+          "options": {
+            "responseCode": 200
+          }
+        },
+        "id": "node-w1-respond-ok",
+        "name": "Respond PENDING",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.1,
+        "position": [
+          660,
+          100
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={{ $env.GEMINI_API_KEY }}",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ JSON.stringify({ contents: [{ parts: [{ text: '[SYSTEM] You are a security risk analyst. Summarize the following API request payload in plain English in under 30 words. Focus entirely on operational impact and risk \u2014 what will physically happen if this executes. Do not repeat field names. Do not expose any token, key, or secret string. Output only the summary sentence.\\n\\n[PAYLOAD]\\nService: ' + $json.target_service + '\\nAgent: ' + $json.requesting_agent + '\\nData: ' + JSON.stringify($json.sanitized_payload) }] }], generationConfig: { temperature: 0, maxOutputTokens: 60 } }) }}",
+          "options": {
+            "response": {
+              "response": {
+                "neverError": true
+              }
+            },
+            "timeout": 10000
+          }
+        },
+        "id": "node-w1-gemini",
+        "name": "Gemini Risk Summary",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "position": [
+          880,
+          100
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Extract risk summary from Gemini response, with fallback\nconst geminiResponse = $input.first().json;\nconst prevData = $('Respond PENDING').first().json;\n\nlet risk_summary = 'Unable to generate summary \u2014 review payload manually before approving.';\ntry {\n  if (geminiResponse.candidates && geminiResponse.candidates[0]) {\n    risk_summary = geminiResponse.candidates[0].content.parts[0].text.trim();\n  }\n} catch (e) {}\n\nreturn [{ json: { ...prevData, risk_summary } }];\n"
+        },
+        "id": "node-w1-extract",
+        "name": "Extract Risk Summary",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1100,
+          100
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Approval Email placeholder - logs instead of sending\n// In production, this will be a Gmail/SMTP node\nconst data = $input.first().json;\nconsole.log('[WARDEN] Would send approval email to:', $env.WARDEN_ADMIN_EMAIL);\nconsole.log('[WARDEN] Subject: [WARDEN] Action Required:', data.target_service, '\u2014', data.requesting_agent);\nreturn [{ json: data }];\n"
+        },
+        "id": "node-w1-email",
+        "name": "Approval Email",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1320,
+          100
+        ]
+      },
+      {
+        "parameters": {
+          "resume": "webhook",
+          "options": {
+            "webhookSuffix": "=/warden/resume/{{ $json.transaction_id }}",
+            "timeout": "72",
+            "timeoutUnit": "hours"
+          }
+        },
+        "id": "node-w1-wait",
+        "name": "Wait for Resolution",
+        "type": "n8n-nodes-base.wait",
+        "typeVersion": 1.1,
+        "position": [
+          1540,
+          100
+        ]
+      }
+    ],
+    "connections": {
+      "Webhook Intake": {
+        "main": [
+          [
+            {
+              "node": "Security PII Scrub HMAC Insert",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Security PII Scrub HMAC Insert": {
+        "main": [
+          [
+            {
+              "node": "Check Error",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check Error": {
+        "main": [
+          [
+            {
+              "node": "Respond Error",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Respond PENDING",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Respond PENDING": {
+        "main": [
+          [
+            {
+              "node": "Gemini Risk Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Gemini Risk Summary": {
+        "main": [
+          [
+            {
+              "node": "Extract Risk Summary",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Extract Risk Summary": {
+        "main": [
+          [
+            {
+              "node": "Approval Email",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Approval Email": {
+        "main": [
+          [
+            {
+              "node": "Wait for Resolution",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Warden Admin",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-31T17:17:19.630Z",
+        "id": 8,
+        "workflowId": "eFBjTec7ykmZazk4",
+        "versionId": "12b4afe4-af36-4173-8970-710efabe9803",
+        "event": "activated",
+        "userId": "cf05353b-f938-497c-aa05-9425603ac089"
+      }
+    ]
+  },
+  "scopes": [
+    "workflow:create",
+    "workflow:delete",
+    "workflow:execute",
+    "workflow:execute-chat",
+    "workflow:list",
+    "workflow:move",
+    "workflow:publish",
+    "workflow:read",
+    "workflow:share",
+    "workflow:unpublish",
+    "workflow:update"
+  ],
+  "checksum": "35b6c0b9502036124dc5004e5ae280040b32104587a616c9b25783d4005cb203"
+}

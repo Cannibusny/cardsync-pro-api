@@ -1,0 +1,827 @@
+{
+  "id": "qmlOO392zMWOrDEY",
+  "name": "WARDEN-W2: Execution Broker",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "warden-resolve",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-w2-webhook",
+      "name": "Resolve Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "warden-resolve"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WARDEN-W2 Node 1: Token Verification\nconst query = $input.first().json.query;\n\n// Verify WARDEN_RESOLVE_TOKEN\nif (!query.token || query.token !== $env.WARDEN_RESOLVE_TOKEN) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 403,\n      response_body: { error: 'Forbidden' },\n      query: query\n    }\n  }];\n}\n\n// Validate action\nif (!query.action || (query.action !== 'approve' && query.action !== 'deny')) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 400,\n      response_body: { error: 'Invalid action parameter' },\n      query: query\n    }\n  }];\n}\n\n// Validate id\nif (!query.id) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 400,\n      response_body: { error: 'Missing transaction ID' },\n      query: query\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    error_response: false,\n    transaction_id: query.id,\n    action: query.action,\n    query: query\n  }\n}];"
+      },
+      "id": "node-w2-token-check",
+      "name": "Token Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-token-error",
+              "leftValue": "={{ $json.error_response }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-w2-token-error-check",
+      "name": "Token Error Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response_body) }}",
+        "options": {
+          "responseCode": "={{ $json.status_code }}"
+        }
+      },
+      "id": "node-w2-token-error-respond",
+      "name": "Respond Token Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        920,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WARDEN-W2 Node 2: State Check - Replay Attack Prevention\nconst data = $input.first().json;\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\n\n// Query Supabase for the transaction\nconst res = await fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${data.transaction_id}&select=id,status,requesting_agent,target_service,payload_data,security_hash`,\n  {\n    headers: {\n      'apikey': supabaseKey,\n      'Authorization': `Bearer ${supabaseKey}`,\n      'Content-Type': 'application/json'\n    }\n  }\n);\nconst rows = await res.json();\n\n// Row not found\nif (!rows || rows.length === 0) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 404,\n      response_body: { error: 'Transaction not found' },\n      action: data.action,\n      transaction_id: data.transaction_id\n    }\n  }];\n}\n\nconst row = rows[0];\n\n// Replay attack prevention: status must be PENDING\nif (row.status !== 'PENDING') {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 409,\n      response_body: { error: 'Transaction already resolved', current_status: row.status },\n      action: data.action,\n      transaction_id: data.transaction_id\n    }\n  }];\n}\n\n// Pass row data forward\nreturn [{\n  json: {\n    error_response: false,\n    transaction_id: row.id,\n    action: data.action,\n    requesting_agent: row.requesting_agent,\n    target_service: row.target_service,\n    payload_data: row.payload_data,\n    security_hash: row.security_hash\n  }\n}];"
+      },
+      "id": "node-w2-state-check",
+      "name": "State Check Replay Prevention",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        920,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-state-error",
+              "leftValue": "={{ $json.error_response }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-w2-state-error-check",
+      "name": "State Error Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response_body) }}",
+        "options": {
+          "responseCode": "={{ $json.status_code }}"
+        }
+      },
+      "id": "node-w2-state-error-respond",
+      "name": "Respond State Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combined Action Handler: Approve/Deny branching\nconst data = $input.first().json;\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\nconst timestamp = new Date().toISOString();\n\nif (data.action === 'deny') {\n  // DENY: Update status and return deny HTML\n  await fetch(\n    `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${data.transaction_id}`,\n    {\n      method: 'PATCH',\n      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' },\n      body: JSON.stringify({ status: 'DENIED', resolution_notes: `Denied by administrator at ${timestamp}` })\n    }\n  );\n  \n  // Resume W1 (best-effort)\n  const n8nBaseUrl = $env.N8N_BASE_URL;\n  try {\n    await fetch(`${n8nBaseUrl}/webhook/warden/resume/${data.transaction_id}`, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({ status: 'DENIED', resolution_notes: `Denied by administrator at ${timestamp}` })\n    });\n  } catch(e) {}\n\n  const html = `<html><body style=\"font-family:Arial,sans-serif;text-align:center;padding:50px;\">\n<h1 style=\"color:#dc3545;\">Request Denied</h1>\n<p>Transaction ID: ${data.transaction_id}</p>\n<p>The credential request has been denied and logged.</p>\n</body></html>`;\n\n  return [{ json: { is_deny: true, response_html: html, transaction_id: data.transaction_id } }];\n}\n\n// APPROVE: Update status to APPROVED, then continue to Service Router\nawait fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${data.transaction_id}`,\n  {\n    method: 'PATCH',\n    headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' },\n    body: JSON.stringify({ status: 'APPROVED' })\n  }\n);\n\nreturn [{ json: { ...data, is_deny: false, status: 'APPROVED' } }];\n"
+      },
+      "id": "node-w2-action-handler",
+      "name": "Action Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1360,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html_response }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html"
+              }
+            ]
+          }
+        }
+      },
+      "id": "node-w2-deny-respond",
+      "name": "Respond Deny HTML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1800,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Service Router - routes to correct API based on target_service\nconst data = $input.first().json;\nconst target = data.target_service;\nconst payload = data.payload_data;\nlet api_response = null;\nlet api_error = null;\n\ntry {\n  if (target === 'Generic') {\n    const res = await fetch(payload.url, {\n      method: payload.method || 'POST',\n      headers: { 'Content-Type': 'application/json', ...(payload.headers || {}) },\n      body: payload.method === 'GET' ? undefined : JSON.stringify(payload.body || {})\n    });\n    api_response = { status: res.status, body: await res.text() };\n  } else if (target === 'Twilio') {\n    // Would use Twilio credentials - placeholder for now\n    api_response = { status: 200, body: 'Twilio call simulated (no credentials configured)' };\n  } else if (target === 'Google_Sheets') {\n    api_response = { status: 200, body: 'Google Sheets operation simulated' };\n  } else if (target === 'Stripe') {\n    api_response = { status: 200, body: 'Stripe operation simulated' };\n  } else if (target === 'GitHub') {\n    api_response = { status: 200, body: 'GitHub operation simulated' };\n  } else if (target === 'Supabase_Direct') {\n    const supabaseUrl = $env.SUPABASE_URL;\n    const supabaseKey = $env.SUPABASE_SERVICE_KEY;\n    const res = await fetch(`${supabaseUrl}/rest/v1/${payload.table}`, {\n      method: payload.method || 'POST',\n      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' },\n      body: JSON.stringify(payload.body || {})\n    });\n    api_response = { status: res.status, body: await res.text() };\n  } else if (target === 'ManyChat') {\n    api_response = { status: 200, body: 'ManyChat operation simulated' };\n  } else {\n    throw new Error(`Unknown target_service: ${target}`);\n  }\n} catch (e) {\n  api_error = e.message;\n}\n\nreturn [{ json: { ...data, api_response, api_error, execution_success: !api_error } }];\n"
+      },
+      "id": "node-w2-router",
+      "name": "Service Router",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// WARDEN-W2 Node 5: Final Reconciliation\nconst data = $input.first().json;\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\nconst n8nBaseUrl = $env.N8N_BASE_URL;\nconst timestamp = new Date().toISOString();\n\nconst transaction_id = data.transaction_id;\nconst target_service = data.target_service;\n\nlet final_status = 'EXECUTED';\nlet resolution_notes = '';\n\nif (data.api_error || !data.execution_success) {\n  final_status = 'FAILED';\n  resolution_notes = `API Error: ${data.api_error || 'Unknown error'}. Timestamp: ${timestamp}`;\n} else {\n  const responseStr = typeof data.api_response === 'string' \n    ? data.api_response.slice(0, 500) \n    : JSON.stringify(data.api_response).slice(0, 500);\n  resolution_notes = `Executed at ${timestamp}. Response: ${responseStr}`;\n}\n\n// Update Supabase\nawait fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${transaction_id}`,\n  {\n    method: 'PATCH',\n    headers: {\n      'apikey': supabaseKey,\n      'Authorization': `Bearer ${supabaseKey}`,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({ status: final_status, resolution_notes })\n  }\n);\n\n// Resume Workflow 1 (best-effort)\ntry {\n  await fetch(`${n8nBaseUrl}/webhook/warden/resume/${transaction_id}`, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ status: final_status, resolution_notes, api_response: data.api_response })\n  });\n} catch (e) {}\n\n// Return HTML response for Sheridan's browser\nconst html = `<html><body style=\"font-family:Arial,sans-serif;text-align:center;padding:50px;\">\n<h1 style=\"color:#28a745;\">Approved</h1>\n<p>Executing <strong>${target_service}</strong> request.</p>\n<p>Transaction ${transaction_id} \u2014 check your Warden log for results.</p>\n<p>Status: ${final_status}</p>\n</body></html>`;\n\nreturn [{ json: { \n  transaction_id, final_status, resolution_notes,\n  response_html: html\n} }];\n"
+      },
+      "id": "node-w2-reconciliation",
+      "name": "Final Reconciliation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2300,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html_response }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html"
+              }
+            ]
+          }
+        }
+      },
+      "id": "node-w2-approve-respond",
+      "name": "Respond Approve HTML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2520,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-is-deny",
+              "leftValue": "={{ $json.is_deny }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-w2-deny-check",
+      "name": "Is Deny Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        900,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Resolve Webhook": {
+      "main": [
+        [
+          {
+            "node": "Token Verification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Token Verification": {
+      "main": [
+        [
+          {
+            "node": "Token Error Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Token Error Check": {
+      "main": [
+        [
+          {
+            "node": "Respond Token Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "State Check Replay Prevention",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Check Replay Prevention": {
+      "main": [
+        [
+          {
+            "node": "State Error Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Error Check": {
+      "main": [
+        [
+          {
+            "node": "Respond State Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Action Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Service Router": {
+      "main": [
+        [
+          {
+            "node": "Final Reconciliation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Action Handler": {
+      "main": [
+        [
+          {
+            "node": "Is Deny Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Deny Check": {
+      "main": [
+        [
+          {
+            "node": "Respond Deny HTML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Service Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "activeVersionId": "fecf232b-0991-45d1-941a-47649eb9e37a",
+  "versionCounter": 24,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-05-31T17:05:47.382Z",
+      "createdAt": "2026-05-31T17:05:47.382Z",
+      "role": "workflow:owner",
+      "workflowId": "qmlOO392zMWOrDEY",
+      "projectId": "ArJYkH1wPqBHHSeU",
+      "project": {
+        "updatedAt": "2026-05-31T17:05:36.111Z",
+        "createdAt": "2026-05-31T17:05:05.597Z",
+        "id": "ArJYkH1wPqBHHSeU",
+        "name": "Warden Admin <admin@warden.local>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "cf05353b-f938-497c-aa05-9425603ac089"
+      }
+    }
+  ],
+  "tags": [],
+  "parentFolder": null,
+  "activeVersion": {
+    "updatedAt": "2026-05-31T17:26:31.263Z",
+    "createdAt": "2026-05-31T17:26:31.263Z",
+    "versionId": "fecf232b-0991-45d1-941a-47649eb9e37a",
+    "workflowId": "qmlOO392zMWOrDEY",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "GET",
+          "path": "warden-resolve",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "id": "node-w2-webhook",
+        "name": "Resolve Webhook",
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2,
+        "position": [
+          250,
+          300
+        ],
+        "webhookId": "warden-resolve"
+      },
+      {
+        "parameters": {
+          "jsCode": "// WARDEN-W2 Node 1: Token Verification\nconst query = $input.first().json.query;\n\n// Verify WARDEN_RESOLVE_TOKEN\nif (!query.token || query.token !== $env.WARDEN_RESOLVE_TOKEN) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 403,\n      response_body: { error: 'Forbidden' },\n      query: query\n    }\n  }];\n}\n\n// Validate action\nif (!query.action || (query.action !== 'approve' && query.action !== 'deny')) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 400,\n      response_body: { error: 'Invalid action parameter' },\n      query: query\n    }\n  }];\n}\n\n// Validate id\nif (!query.id) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 400,\n      response_body: { error: 'Missing transaction ID' },\n      query: query\n    }\n  }];\n}\n\nreturn [{\n  json: {\n    error_response: false,\n    transaction_id: query.id,\n    action: query.action,\n    query: query\n  }\n}];"
+        },
+        "id": "node-w2-token-check",
+        "name": "Token Verification",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          480,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "cond-token-error",
+                "leftValue": "={{ $json.error_response }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "node-w2-token-error-check",
+        "name": "Token Error Check",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          700,
+          300
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify($json.response_body) }}",
+          "options": {
+            "responseCode": "={{ $json.status_code }}"
+          }
+        },
+        "id": "node-w2-token-error-respond",
+        "name": "Respond Token Error",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          920,
+          180
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// WARDEN-W2 Node 2: State Check - Replay Attack Prevention\nconst data = $input.first().json;\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\n\n// Query Supabase for the transaction\nconst res = await fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${data.transaction_id}&select=id,status,requesting_agent,target_service,payload_data,security_hash`,\n  {\n    headers: {\n      'apikey': supabaseKey,\n      'Authorization': `Bearer ${supabaseKey}`,\n      'Content-Type': 'application/json'\n    }\n  }\n);\nconst rows = await res.json();\n\n// Row not found\nif (!rows || rows.length === 0) {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 404,\n      response_body: { error: 'Transaction not found' },\n      action: data.action,\n      transaction_id: data.transaction_id\n    }\n  }];\n}\n\nconst row = rows[0];\n\n// Replay attack prevention: status must be PENDING\nif (row.status !== 'PENDING') {\n  return [{\n    json: {\n      error_response: true,\n      status_code: 409,\n      response_body: { error: 'Transaction already resolved', current_status: row.status },\n      action: data.action,\n      transaction_id: data.transaction_id\n    }\n  }];\n}\n\n// Pass row data forward\nreturn [{\n  json: {\n    error_response: false,\n    transaction_id: row.id,\n    action: data.action,\n    requesting_agent: row.requesting_agent,\n    target_service: row.target_service,\n    payload_data: row.payload_data,\n    security_hash: row.security_hash\n  }\n}];"
+        },
+        "id": "node-w2-state-check",
+        "name": "State Check Replay Prevention",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          920,
+          400
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "cond-state-error",
+                "leftValue": "={{ $json.error_response }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "node-w2-state-error-check",
+        "name": "State Error Check",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2,
+        "position": [
+          1140,
+          400
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ JSON.stringify($json.response_body) }}",
+          "options": {
+            "responseCode": "={{ $json.status_code }}"
+          }
+        },
+        "id": "node-w2-state-error-respond",
+        "name": "Respond State Error",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          1360,
+          280
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Combined Action Handler: Approve/Deny branching\nconst data = $input.first().json;\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\nconst timestamp = new Date().toISOString();\n\nif (data.action === 'deny') {\n  // DENY: Update status and return deny HTML\n  await fetch(\n    `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${data.transaction_id}`,\n    {\n      method: 'PATCH',\n      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' },\n      body: JSON.stringify({ status: 'DENIED', resolution_notes: `Denied by administrator at ${timestamp}` })\n    }\n  );\n  \n  // Resume W1 (best-effort)\n  const n8nBaseUrl = $env.N8N_BASE_URL;\n  try {\n    await fetch(`${n8nBaseUrl}/webhook/warden/resume/${data.transaction_id}`, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({ status: 'DENIED', resolution_notes: `Denied by administrator at ${timestamp}` })\n    });\n  } catch(e) {}\n\n  const html = `<html><body style=\"font-family:Arial,sans-serif;text-align:center;padding:50px;\">\n<h1 style=\"color:#dc3545;\">Request Denied</h1>\n<p>Transaction ID: ${data.transaction_id}</p>\n<p>The credential request has been denied and logged.</p>\n</body></html>`;\n\n  return [{ json: { is_deny: true, response_html: html, transaction_id: data.transaction_id } }];\n}\n\n// APPROVE: Update status to APPROVED, then continue to Service Router\nawait fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${data.transaction_id}`,\n  {\n    method: 'PATCH',\n    headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' },\n    body: JSON.stringify({ status: 'APPROVED' })\n  }\n);\n\nreturn [{ json: { ...data, is_deny: false, status: 'APPROVED' } }];\n"
+        },
+        "id": "node-w2-action-handler",
+        "name": "Action Handler",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1360,
+          520
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "text",
+          "responseBody": "={{ $json.html_response }}",
+          "options": {
+            "responseCode": 200,
+            "responseHeaders": {
+              "entries": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/html"
+                }
+              ]
+            }
+          }
+        },
+        "id": "node-w2-deny-respond",
+        "name": "Respond Deny HTML",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          1800,
+          400
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Service Router - routes to correct API based on target_service\nconst data = $input.first().json;\nconst target = data.target_service;\nconst payload = data.payload_data;\nlet api_response = null;\nlet api_error = null;\n\ntry {\n  if (target === 'Generic') {\n    const res = await fetch(payload.url, {\n      method: payload.method || 'POST',\n      headers: { 'Content-Type': 'application/json', ...(payload.headers || {}) },\n      body: payload.method === 'GET' ? undefined : JSON.stringify(payload.body || {})\n    });\n    api_response = { status: res.status, body: await res.text() };\n  } else if (target === 'Twilio') {\n    // Would use Twilio credentials - placeholder for now\n    api_response = { status: 200, body: 'Twilio call simulated (no credentials configured)' };\n  } else if (target === 'Google_Sheets') {\n    api_response = { status: 200, body: 'Google Sheets operation simulated' };\n  } else if (target === 'Stripe') {\n    api_response = { status: 200, body: 'Stripe operation simulated' };\n  } else if (target === 'GitHub') {\n    api_response = { status: 200, body: 'GitHub operation simulated' };\n  } else if (target === 'Supabase_Direct') {\n    const supabaseUrl = $env.SUPABASE_URL;\n    const supabaseKey = $env.SUPABASE_SERVICE_KEY;\n    const res = await fetch(`${supabaseUrl}/rest/v1/${payload.table}`, {\n      method: payload.method || 'POST',\n      headers: { 'apikey': supabaseKey, 'Authorization': `Bearer ${supabaseKey}`, 'Content-Type': 'application/json' },\n      body: JSON.stringify(payload.body || {})\n    });\n    api_response = { status: res.status, body: await res.text() };\n  } else if (target === 'ManyChat') {\n    api_response = { status: 200, body: 'ManyChat operation simulated' };\n  } else {\n    throw new Error(`Unknown target_service: ${target}`);\n  }\n} catch (e) {\n  api_error = e.message;\n}\n\nreturn [{ json: { ...data, api_response, api_error, execution_success: !api_error } }];\n"
+        },
+        "id": "node-w2-router",
+        "name": "Service Router",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1800,
+          640
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// WARDEN-W2 Node 5: Final Reconciliation\nconst data = $input.first().json;\nconst supabaseUrl = $env.SUPABASE_URL;\nconst supabaseKey = $env.SUPABASE_SERVICE_KEY;\nconst n8nBaseUrl = $env.N8N_BASE_URL;\nconst timestamp = new Date().toISOString();\n\nconst transaction_id = data.transaction_id;\nconst target_service = data.target_service;\n\nlet final_status = 'EXECUTED';\nlet resolution_notes = '';\n\nif (data.api_error || !data.execution_success) {\n  final_status = 'FAILED';\n  resolution_notes = `API Error: ${data.api_error || 'Unknown error'}. Timestamp: ${timestamp}`;\n} else {\n  const responseStr = typeof data.api_response === 'string' \n    ? data.api_response.slice(0, 500) \n    : JSON.stringify(data.api_response).slice(0, 500);\n  resolution_notes = `Executed at ${timestamp}. Response: ${responseStr}`;\n}\n\n// Update Supabase\nawait fetch(\n  `${supabaseUrl}/rest/v1/warden_transactions?id=eq.${transaction_id}`,\n  {\n    method: 'PATCH',\n    headers: {\n      'apikey': supabaseKey,\n      'Authorization': `Bearer ${supabaseKey}`,\n      'Content-Type': 'application/json'\n    },\n    body: JSON.stringify({ status: final_status, resolution_notes })\n  }\n);\n\n// Resume Workflow 1 (best-effort)\ntry {\n  await fetch(`${n8nBaseUrl}/webhook/warden/resume/${transaction_id}`, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ status: final_status, resolution_notes, api_response: data.api_response })\n  });\n} catch (e) {}\n\n// Return HTML response for Sheridan's browser\nconst html = `<html><body style=\"font-family:Arial,sans-serif;text-align:center;padding:50px;\">\n<h1 style=\"color:#28a745;\">Approved</h1>\n<p>Executing <strong>${target_service}</strong> request.</p>\n<p>Transaction ${transaction_id} \u2014 check your Warden log for results.</p>\n<p>Status: ${final_status}</p>\n</body></html>`;\n\nreturn [{ json: { \n  transaction_id, final_status, resolution_notes,\n  response_html: html\n} }];\n"
+        },
+        "id": "node-w2-reconciliation",
+        "name": "Final Reconciliation",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          2300,
+          640
+        ]
+      },
+      {
+        "parameters": {
+          "respondWith": "text",
+          "responseBody": "={{ $json.html_response }}",
+          "options": {
+            "responseCode": 200,
+            "responseHeaders": {
+              "entries": [
+                {
+                  "name": "Content-Type",
+                  "value": "text/html"
+                }
+              ]
+            }
+          }
+        },
+        "id": "node-w2-approve-respond",
+        "name": "Respond Approve HTML",
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1,
+        "position": [
+          2520,
+          640
+        ]
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict"
+            },
+            "conditions": [
+              {
+                "id": "cond-is-deny",
+                "leftValue": "={{ $json.is_deny }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "id": "node-w2-deny-check",
+        "name": "Is Deny Check",
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.2,
+        "position": [
+          900,
+          300
+        ]
+      }
+    ],
+    "connections": {
+      "Resolve Webhook": {
+        "main": [
+          [
+            {
+              "node": "Token Verification",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Token Verification": {
+        "main": [
+          [
+            {
+              "node": "Token Error Check",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Token Error Check": {
+        "main": [
+          [
+            {
+              "node": "Respond Token Error",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "State Check Replay Prevention",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "State Check Replay Prevention": {
+        "main": [
+          [
+            {
+              "node": "State Error Check",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "State Error Check": {
+        "main": [
+          [
+            {
+              "node": "Respond State Error",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Action Handler",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Service Router": {
+        "main": [
+          [
+            {
+              "node": "Final Reconciliation",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Action Handler": {
+        "main": [
+          [
+            {
+              "node": "Is Deny Check",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Is Deny Check": {
+        "main": [
+          [
+            {
+              "node": "Respond Deny HTML",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Service Router",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Warden Admin",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-05-31T17:26:31.323Z",
+        "id": 14,
+        "workflowId": "qmlOO392zMWOrDEY",
+        "versionId": "fecf232b-0991-45d1-941a-47649eb9e37a",
+        "event": "activated",
+        "userId": "cf05353b-f938-497c-aa05-9425603ac089"
+      }
+    ]
+  },
+  "scopes": [
+    "workflow:create",
+    "workflow:delete",
+    "workflow:execute",
+    "workflow:execute-chat",
+    "workflow:list",
+    "workflow:move",
+    "workflow:publish",
+    "workflow:read",
+    "workflow:share",
+    "workflow:unpublish",
+    "workflow:update"
+  ],
+  "checksum": "9429e1dc1e42ccd00e42874573c595514cac0dcfac719be53c107e7673e8e956"
+}
